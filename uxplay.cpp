@@ -4002,6 +4002,7 @@ int start_uxplay (int argc, char *argv[]) {
         stop_dnssd();
     }
     cleanup();
+    return 0;
 }
 
 void stop_uxplay() {
