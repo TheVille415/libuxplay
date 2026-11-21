@@ -57,6 +57,13 @@ else()
   set( CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE )
 endif()
 
+# uxplay-windows ships Bonjour (dnssd.dll + mDNSResponder.exe service), so keep
+# the dns_sd path as the Windows default; the internal mdnsd would contend for
+# UDP 5353 with the Bonjour service. Pass -DUSE_MDNS=ON to opt into lib/mdnsd.
+if ( WIN32 AND NOT USE_MDNS )
+  set( USE_DNS_SD ON )
+endif()
+
 if (USE_DNS_SD OR ( APPLE AND NOT USE_MDNS ))
   message ( STATUS "******** using Bounjour/Apple dns_sd.h for Service Discovery")
   add_definitions( -DEXTERNAL_DNS_SD )
