@@ -34,6 +34,7 @@
 #include <sstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <iterator>
 #include <sys/stat.h>
 #include <cstdio>
@@ -832,8 +833,45 @@ static void dump_video_to_file(unsigned char *data, int datalen) {
     }
 }
 
+/* video stall detection (logging only): frames arrive on the raop thread,
+ * the check runs once a second on the main loop */
+#define VIDEO_STALL_USECS (5 * G_USEC_PER_SEC)
+static std::mutex video_stall_mutex;
+static gint64 last_video_frame_us = 0;   /* 0: no mirror video being watched */
+static bool video_stalled = false;
+
+static void video_stall_frame_received() {
+    std::lock_guard<std::mutex> lock(video_stall_mutex);
+    gint64 now = g_get_monotonic_time();
+    if (video_stalled) {
+        LOGW("video resumed after %.1fs stall", (double) (now - last_video_frame_us) / G_USEC_PER_SEC);
+        video_stalled = false;
+    }
+    last_video_frame_us = now;
+}
+
+static void video_stall_stop_watching(const char *reason) {
+    std::lock_guard<std::mutex> lock(video_stall_mutex);
+    if (video_stalled) {
+        LOGW("video stalled for %.1fs, never resumed (%s)",
+             (double) (g_get_monotonic_time() - last_video_frame_us) / G_USEC_PER_SEC, reason);
+    }
+    video_stalled = false;
+    last_video_frame_us = 0;
+}
+
+static void video_stall_check() {
+    std::lock_guard<std::mutex> lock(video_stall_mutex);
+    if (!open_connections || !last_video_frame_us || video_stalled) return;
+    if (g_get_monotonic_time() - last_video_frame_us >= VIDEO_STALL_USECS) {
+        video_stalled = true;
+        LOGW("video stalled for %ds (client still connected)", (int) (VIDEO_STALL_USECS / G_USEC_PER_SEC));
+    }
+}
+
 static gboolean feedback_callback(gpointer loop) {
     if (open_connections) {
+        video_stall_check();
         if (missed_feedback_limit && missed_feedback > missed_feedback_limit) {
             LOGI("***ERROR lost connection with client (network problem?)");
             LOGI("   Interval since last client feedback request exceeds limit of %u seconds", missed_feedback_limit);
@@ -2777,6 +2815,9 @@ static bool check_blocked_client(char *deviceid) {
 //to be simplified
 
 extern "C" void video_reset(void *cls, reset_type_t type) {
+    if (type != RESET_TYPE_ON_VIDEO_PLAY) {
+        video_stall_stop_watching("video reset");
+    }
     switch (type) {
     case RESET_TYPE_NOHOLD:
         LOGD("video_reset: type = NoHold");
@@ -2903,6 +2944,7 @@ extern "C" void conn_destroy (void *cls) {
     open_connections--;
     LOGD("Open connections: %i", open_connections);
     if (open_connections == 0) {
+        video_stall_stop_watching("connection closed");
         remote_clock_offset = 0;
         if (use_audio) {
             audio_renderer_stop();
@@ -2922,6 +2964,7 @@ extern "C" void conn_feedback (void *cls) {
 }
 
 extern "C" void conn_reset (void *cls, int reason) {
+    video_stall_stop_watching("connection reset");
     switch (reason) {
     case 1:
         LOGI("*** ERROR lost connection with client (network problem?)");
@@ -3004,6 +3047,7 @@ extern "C" void video_process (void *cls, raop_ntp_t *ntp, video_decode_struct *
     if (mux_to_file) {
         mux_renderer_push_video(data->data, data->data_len, data->ntp_time_remote);
     }
+    video_stall_frame_received();
     if (use_video) {
         if (!remote_clock_offset) {
             uint64_t local_time = (data->ntp_time_local ? data->ntp_time_local : get_local_time());
@@ -3037,6 +3081,7 @@ extern "C" void mirror_video_running  (void *cls, bool is_running) {
 #endif
 
 extern "C" void video_pause (void *cls) {
+    video_stall_stop_watching("video paused");
     if (use_video) {
         video_renderer_pause();
     }
