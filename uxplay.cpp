@@ -315,7 +315,16 @@ static void log(int level, const char* format, ...) {
     std::vector<char> message(static_cast<size_t>(length) + 1);
     vsnprintf(message.data(), message.size(), format, vargs);
     va_end(vargs);
-    std::string line(prefix);
+    // Same local ISO-8601 format as the Qt app's own lines: 2026-11-23T22:23:26.085
+    GDateTime *now = g_date_time_new_now_local();
+    gchar *stamp = g_date_time_format(now, "%Y-%m-%dT%H:%M:%S");
+    char millis[8];
+    snprintf(millis, sizeof(millis), ".%03d ", g_date_time_get_microsecond(now) / 1000);
+    std::string line(stamp ? stamp : "");
+    g_free(stamp);
+    g_date_time_unref(now);
+    line += millis;
+    line += prefix;
     line.append(message.data(), static_cast<size_t>(length));
     if (line.empty() || line.back() != '\n') line += '\n';
     // Emit the prefix, message and newline together to prevent interleaving.
